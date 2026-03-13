@@ -1,0 +1,15 @@
+# Synthetic crypto exchange simulator — dependencies
+# Python 3.10+
+
+# Web and WebSocket
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+websockets>=12.0
+
+# Schemas and validation
+pydantic>=2.5.0
+
+# Synthetic market generation (optional but recommended)
+numpy>=1.26.0
+
+# Async (stdlib asyncio; no extra deps)
