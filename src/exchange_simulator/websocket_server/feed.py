@@ -1,86 +1,122 @@
 # websocket_server/feed.py
 """
-WebSocket market data feed: streams order book updates, trade events,
-and ticker updates to connected clients. Messages resemble real exchange formats.
+WebSocket market data feed: FeedBroadcaster and handle_feed_websocket.
+Broadcasts book deltas, trades, ticker, and optional fills with send timeout.
 """
 
 import asyncio
 import json
-from typing import Any
+from typing import Optional
 
-from fastapi import WebSocket, WebSocketDisconnect
-
-from exchange_simulator.schemas.book import OrderBookDelta, OrderBookSnapshot
+from exchange_simulator.schemas.book import OrderBookDelta
 from exchange_simulator.schemas.market_data import TickerUpdate
-from exchange_simulator.schemas.trades import PublicTrade
+from exchange_simulator.schemas.trades import FillEvent, PublicTrade
+
+try:
+    from config.settings import BROADCAST_SEND_TIMEOUT_SEC
+except ImportError:
+    BROADCAST_SEND_TIMEOUT_SEC = 10.0
 
 
 class FeedBroadcaster:
     """
-    Manages WebSocket connections and broadcasts market data events
-    (book snapshot/delta, trade, ticker) to all connected clients
-    or to clients subscribed to specific channels/symbols.
+    Broadcasts book deltas, trades, ticker, and optional fills to all connected
+    WebSocket clients. Drops clients that don't accept within BROADCAST_SEND_TIMEOUT_SEC.
     """
 
-    def __init__(self):
-        self._connections: list[WebSocket] = []
+    def __init__(self, send_timeout_sec: float = BROADCAST_SEND_TIMEOUT_SEC):
+        self._clients: set[asyncio.Queue] = set()
+        self._send_timeout = send_timeout_sec
         self._lock = asyncio.Lock()
 
-    async def subscribe(self, ws: WebSocket) -> None:
-        await ws.accept()
-        async with self._lock:
-            self._connections.append(ws)
+    def _payload(self, channel: str, type_: str, data: dict) -> str:
+        return json.dumps({"channel": channel, "type": type_, "data": data})
 
-    async def unsubscribe(self, ws: WebSocket) -> None:
+    async def _send_to_all(self, channel: str, type_: str, data: dict) -> None:
+        msg = self._payload(channel, type_, data)
         async with self._lock:
-            if ws in self._connections:
-                self._connections.remove(ws)
-
-    async def broadcast(self, message: dict[str, Any]) -> None:
-        """Send a JSON message to all connected clients."""
-        text = json.dumps(message)
-        async with self._lock:
-            dead = []
-            for conn in self._connections:
+            dead = set()
+            for q in self._clients:
                 try:
-                    await conn.send_text(text)
+                    await asyncio.wait_for(q.put(msg), timeout=self._send_timeout)
+                except asyncio.TimeoutError:
+                    dead.add(q)
                 except Exception:
-                    dead.append(conn)
-            for conn in dead:
-                if conn in self._connections:
-                    self._connections.remove(conn)
-
-    async def broadcast_book_snapshot(self, snapshot: OrderBookSnapshot) -> None:
-        await self.broadcast({"channel": "book", "type": "snapshot", "data": snapshot.model_dump()})
+                    dead.add(q)
+            for q in dead:
+                self._clients.discard(q)
 
     async def broadcast_book_delta(self, delta: OrderBookDelta) -> None:
-        await self.broadcast({"channel": "book", "type": "delta", "data": delta.model_dump()})
+        data = {
+            "symbol": delta.symbol,
+            "bids": [{"price": p.price, "quantity": p.quantity} for p in delta.bids],
+            "asks": [{"price": p.price, "quantity": p.quantity} for p in delta.asks],
+            "sequence": delta.sequence,
+        }
+        await self._send_to_all("book", "delta", data)
 
     async def broadcast_trade(self, trade: PublicTrade) -> None:
-        await self.broadcast({"channel": "trades", "type": "trade", "data": trade.model_dump()})
+        data = {
+            "symbol": trade.symbol,
+            "trade_id": trade.trade_id,
+            "price": trade.price,
+            "quantity": trade.quantity,
+            "side": trade.side.value,
+            "timestamp": trade.timestamp,
+        }
+        await self._send_to_all("trades", "trade", data)
 
     async def broadcast_ticker(self, ticker: TickerUpdate) -> None:
-        await self.broadcast({"channel": "ticker", "type": "ticker", "data": ticker.model_dump()})
+        data = {
+            "symbol": ticker.symbol,
+            "last_price": ticker.last_price,
+            "best_bid": ticker.best_bid,
+            "best_ask": ticker.best_ask,
+            "volume_24h": ticker.volume_24h,
+            "timestamp": ticker.timestamp,
+        }
+        await self._send_to_all("ticker", "ticker", data)
+
+    async def broadcast_fill(self, fill: FillEvent) -> None:
+        data = {
+            "order_id": fill.order_id,
+            "client_order_id": fill.client_order_id,
+            "symbol": fill.symbol,
+            "side": fill.side.value,
+            "price": fill.price,
+            "quantity": fill.quantity,
+            "fill_id": fill.fill_id,
+            "is_maker": fill.is_maker,
+            "timestamp": fill.timestamp,
+        }
+        await self._send_to_all("orders", "fill", data)
+
+    def register(self) -> asyncio.Queue:
+        """Register a new client; returns a queue the client should consume from."""
+        q: asyncio.Queue = asyncio.Queue()
+        self._clients.add(q)
+        return q
+
+    def unregister(self, q: asyncio.Queue) -> None:
+        self._clients.discard(q)
 
 
-async def handle_feed_websocket(ws: WebSocket, broadcaster: FeedBroadcaster) -> None:
+async def handle_feed_websocket(
+    websocket,
+    broadcaster: FeedBroadcaster,
+) -> None:
     """
     Handle a single WebSocket connection to the feed.
-    Client can send subscribe messages; server pushes market data.
+    Sends all broadcast messages to this client; drops if send blocks too long.
     """
-    await broadcaster.subscribe(ws)
+    queue = broadcaster.register()
     try:
         while True:
-            raw = await ws.receive_text()
-            # Optional: parse subscribe message and filter by channel/symbol
-            try:
-                msg = json.loads(raw)
-                if msg.get("action") == "subscribe":
-                    # For now we send everything; could filter by msg.get("channels") / symbols
-                    await ws.send_text(json.dumps({"event": "subscribed", "message": "OK"}))
-            except json.JSONDecodeError:
-                pass
-    except WebSocketDisconnect:
+            msg = await queue.get()
+            await asyncio.wait_for(websocket.send_text(msg), timeout=BROADCAST_SEND_TIMEOUT_SEC)
+    except asyncio.TimeoutError:
+        pass
+    except Exception:
         pass
     finally:
-        await broadcaster.unsubscribe(ws)
+        broadcaster.unregister(queue)

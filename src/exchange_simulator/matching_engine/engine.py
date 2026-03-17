@@ -6,6 +6,7 @@ Produces fill events and book update events for the WebSocket broadcaster.
 """
 
 import asyncio
+import time
 from typing import Any, Callable, Optional
 
 from exchange_simulator.order_book.book import BookOrder, OrderBook
@@ -64,7 +65,7 @@ class MatchingEngine:
         For market orders: matches only; no rest.
         """
         async with self._lock:
-            return self._match_and_book(
+            result = self._match_and_book(
                 side=side,
                 order_type=order_type,
                 quantity=quantity,
@@ -72,6 +73,8 @@ class MatchingEngine:
                 client_order_id=client_order_id,
                 order_id=order_id,
             )
+        await asyncio.sleep(0)  # yield so Binance feed and broadcasts can run
+        return result
 
     def _match_and_book(
         self,
@@ -108,6 +111,7 @@ class MatchingEngine:
                 if fill_qty <= 0:
                     continue
                 trade_id = self._next_trade_id()
+                ts_ms = str(int(time.time() * 1000))
                 fill_side = TradeSide.BUY if side_str == "buy" else TradeSide.SELL
                 fills.append(
                     FillEvent(
@@ -119,6 +123,7 @@ class MatchingEngine:
                         quantity=fill_qty,
                         fill_id=trade_id,
                         is_maker=False,
+                        timestamp=ts_ms,
                     )
                 )
                 public_trades.append(
@@ -128,6 +133,7 @@ class MatchingEngine:
                         price=level_price,
                         quantity=fill_qty,
                         side=fill_side,
+                        timestamp=ts_ms,
                     )
                 )
                 # Maker fill (for the resting order owner)
@@ -141,6 +147,7 @@ class MatchingEngine:
                         quantity=fill_qty,
                         fill_id=trade_id,
                         is_maker=True,
+                        timestamp=ts_ms,
                     )
                 )
                 taker_remaining -= fill_qty

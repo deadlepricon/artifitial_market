@@ -54,25 +54,33 @@ def list_symbols() -> list[str]:
 
 def ensure_default_symbols() -> None:
     """
-    Register default symbol (BTC/USDT). Call at startup.
-    Add more symbols here for multi-symbol support.
+    Register default symbols (BTC/USDT, ETH/USDT). Call at startup.
+    Each gets its own order book, matching engine, and market generator.
     """
     from config.settings import (
         DEFAULT_INITIAL_MID_PRICE,
         DEFAULT_LOT_SIZE,
-        DEFAULT_SYMBOL,
         DEFAULT_TICK_SIZE,
+        ETH_INITIAL_MID_PRICE,
+        TRADABLE_SYMBOLS,
     )
 
-    if DEFAULT_SYMBOL not in _registry:
-        base, quote = DEFAULT_SYMBOL.split("/") if "/" in DEFAULT_SYMBOL else ("BTC", "USDT")
+    initial_mid_by_symbol = {
+        "BTC/USDT": DEFAULT_INITIAL_MID_PRICE,
+        "ETH/USDT": ETH_INITIAL_MID_PRICE,
+    }
+    for sym in TRADABLE_SYMBOLS:
+        if sym in _registry:
+            continue
+        base, quote = sym.split("/") if "/" in sym else (sym[:3], "USDT")
+        mid = initial_mid_by_symbol.get(sym, DEFAULT_INITIAL_MID_PRICE)
         register_symbol(
             SymbolInfo(
-                symbol=DEFAULT_SYMBOL,
+                symbol=sym,
                 base=base,
                 quote=quote,
                 tick_size=DEFAULT_TICK_SIZE,
                 lot_size=DEFAULT_LOT_SIZE,
-                initial_mid_price=DEFAULT_INITIAL_MID_PRICE,
+                initial_mid_price=mid,
             )
         )

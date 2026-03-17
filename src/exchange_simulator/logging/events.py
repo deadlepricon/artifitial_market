@@ -12,6 +12,14 @@ from typing import Any, Optional
 logger = logging.getLogger("exchange_simulator")
 
 
+def log_order_received(side: str, quantity: float, order_type: str, price: Optional[float] = None) -> None:
+    """Log when a buy/sell order is received from a client (REST API)."""
+    if order_type == "market":
+        logger.info("client order received: %s %s qty=%.6f (market)", side.upper(), order_type, quantity)
+    else:
+        logger.info("client order received: %s %s qty=%.6f price=%s", side.upper(), order_type, quantity, price)
+
+
 def log_order_placed(
     order_id: str,
     symbol: str,
@@ -52,6 +60,27 @@ def log_order_filled(
 
 def log_order_cancelled(order_id: str, symbol: str) -> None:
     logger.info("order_cancelled order_id=%s symbol=%s", order_id, symbol)
+
+
+def log_client_trade_closed(
+    order_id: str,
+    symbol: str,
+    reason: str,
+    *,
+    filled_quantity: Optional[float] = None,
+    avg_price: Optional[float] = None,
+) -> None:
+    """Log when a client closes a trade: by cancel or by full fill."""
+    if reason == "cancelled":
+        logger.info("client closed trade order_id=%s symbol=%s reason=cancelled", order_id, symbol)
+    else:
+        logger.info(
+            "client closed trade order_id=%s symbol=%s reason=filled filled_quantity=%s avg_price=%s",
+            order_id,
+            symbol,
+            filled_quantity,
+            avg_price,
+        )
 
 
 def log_trade(symbol: str, trade_id: str, price: float, quantity: float, side: str) -> None:

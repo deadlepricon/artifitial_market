@@ -4,6 +4,29 @@ Base URL: **http://localhost:8765**
 WebSocket URL: **ws://localhost:8765/ws/feed**  
 Symbol: **BTC/USDT** (only symbol supported for now)
 
+**Market data:**
+- **Trades** — Live from Binance; you also get trades when your orders fill on the simulator.
+- **Ticker** — From Binance (`last_price`, volume); `best_bid` / `best_ask` from the simulator’s order book.
+- **Order book** — Synthetic (simulator-generated); book deltas keep your in-memory book in sync.
+
+---
+
+## HFT market-making strategy compliance
+
+This simulator satisfies the “Artificial Market” requirements for the HFT market-making strategy:
+
+| Requirement | Status |
+|-------------|--------|
+| WebSocket at `ws://localhost:8765/ws/feed` | ✅ |
+| Book deltas: `channel: "book"`, `type: "delta"`, `data: { symbol, bids, asks, sequence }` | ✅ |
+| Trades: `channel: "trades"`, `type: "trade"`, `data: { symbol, trade_id, price, quantity, side, timestamp }` | ✅ |
+| `POST /api/orders` with `symbol`, `side`, `order_type`, `quantity`, `price`, `client_order_id`; response has `order_id` | ✅ |
+| `POST /api/orders/cancel` with `symbol`, `order_id` | ✅ |
+| `GET /api/orders/{order_id}` | ✅ |
+| Symbol format `BTC/USDT` | ✅ |
+| **Optional:** Real matching + book updates on fill | ✅ (limit orders go in book or match; book delta sent on change) |
+| **Optional:** Fill events for client orders | ✅ (`channel: "orders"`, `type: "fill"` — see below) |
+
 ---
 
 ## 1. REST API (orders)
@@ -120,7 +143,7 @@ Server may reply: `{"event": "subscribed", "message": "OK"}`.
 
 Every message is a JSON object with `channel`, `type`, and `data`.
 
-**Order book update (incremental):**
+**Order book update (incremental, synthetic):**
 
 ```json
 {
@@ -128,14 +151,17 @@ Every message is a JSON object with `channel`, `type`, and `data`.
   "type": "delta",
   "data": {
     "symbol": "BTC/USDT",
-    "bids": [{"price": 49999.5, "quantity": 0.01}, ...],
-    "asks": [{"price": 50000.5, "quantity": 0.008}, ...],
+    "bids": [{"price": 49999.5, "quantity": 0.01}, {"price": 49999.0, "quantity": 0.02}],
+    "asks": [{"price": 50000.5, "quantity": 0.008}, {"price": 50001.0, "quantity": 0.015}],
     "sequence": 123
   }
 }
 ```
 
-**Trade:**
+- `bids` / `asks`: arrays of `{"price": number, "quantity": number}` (best first).
+- `sequence`: increments on each book change.
+
+**Trade (live from Binance or from your fills):**
 
 ```json
 {
@@ -143,16 +169,20 @@ Every message is a JSON object with `channel`, `type`, and `data`.
   "type": "trade",
   "data": {
     "symbol": "BTC/USDT",
-    "trade_id": "trd_1",
-    "price": 50000.25,
-    "quantity": 0.001,
-    "side": "buy",
-    "timestamp": null
+    "trade_id": "123456789",
+    "price": 97234.56,
+    "quantity": 0.0015,
+    "side": "sell",
+    "timestamp": "1699900123456"
   }
 }
 ```
 
-**Ticker:**
+- **From Binance:** `trade_id` is numeric string; `timestamp` is **milliseconds since epoch** (string).
+- **From simulator (your fill):** `trade_id` is like `"trd_42"`; `timestamp` may be `null`.
+- `side`: `"buy"` or `"sell"` (aggressor side).
+
+**Ticker (from Binance last trade):**
 
 ```json
 {
@@ -160,14 +190,41 @@ Every message is a JSON object with `channel`, `type`, and `data`.
   "type": "ticker",
   "data": {
     "symbol": "BTC/USDT",
-    "last_price": 50000.25,
-    "best_bid": 50000.0,
-    "best_ask": 50000.5,
-    "volume_24h": 0.0,
+    "last_price": 97234.56,
+    "best_bid": 97234.56,
+    "best_ask": 97234.56,
+    "volume_24h": 125.5,
+    "timestamp": "1699900123456"
+  }
+}
+```
+
+- `last_price`: last trade price from Binance.
+- `best_bid` / `best_ask`: from the simulator’s order book (top of book).
+- `volume_24h`: cumulative volume since simulator started.
+- `timestamp`: last trade time in **milliseconds** (string).
+
+**Fill (optional — when your order is filled):**
+
+```json
+{
+  "channel": "orders",
+  "type": "fill",
+  "data": {
+    "order_id": "ord_BTCUSDT_42",
+    "client_order_id": null,
+    "symbol": "BTC/USDT",
+    "side": "buy",
+    "price": 97234.5,
+    "quantity": 0.001,
+    "fill_id": "trd_123",
+    "is_maker": false,
     "timestamp": null
   }
 }
 ```
+
+- One message per fill (partial or full). Use for real fill feedback when not in paper mode.
 
 ---
 
@@ -184,6 +241,8 @@ Every message is a JSON object with `channel`, `type`, and `data`.
 ## 4. Rust checklist
 
 - **REST:** any HTTP client (e.g. `reqwest`) to `http://localhost:8765/api/*` with JSON bodies.
-- **WebSocket:** use a WS client (e.g. `tokio-tungstenite`) to `ws://localhost:8765/ws/feed`; parse each text frame as JSON and switch on `channel` + `type` to handle `book` (delta), `trades` (trade), `ticker` (ticker).
+- **WebSocket:** use a WS client (e.g. `tokio-tungstenite`) to `ws://localhost:8765/ws/feed`; parse each text frame as JSON and switch on `channel` + `type` to handle `book` (delta), `trades` (trade), `ticker` (ticker), `orders` (fill).
 - **Symbol:** always `"BTC/USDT"` for the simulator.
+- **Trade IDs:** Binance trades use numeric strings; simulator-generated fills use `"trd_<n>"`. Use `trade_id` to dedupe if needed.
+- **Timestamps:** Trade/ticker `timestamp` from Binance is **milliseconds since epoch** (string). Simulator fills may have `null`.
 - **Errors:** REST returns 4xx/5xx with a body like `{"detail": "..."}`.
